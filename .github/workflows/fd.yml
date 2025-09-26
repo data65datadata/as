@@ -32,12 +32,12 @@ jobs:
                           Invoke-WebRequest -Uri $url -OutFile $outPath -ErrorAction Stop
                           Write-Host "Downloaded $filename to $outPath"
                       } catch {
-                          Write-Error ("Failed to download $url: {0}" -f $_.Exception.Message)
+                          Write-Error "Failed to download ${url}: $($_.Exception.Message)"
                       }
                   }
               }
           } else {
-              Write-Error "links.txt not found in repository - skipping downloads"
+              Write-Warning "links.txt not found in repository - skipping downloads"
           }
           
           Write-Host "Pre-required files downloaded to $env:TEMP\Downloads"
